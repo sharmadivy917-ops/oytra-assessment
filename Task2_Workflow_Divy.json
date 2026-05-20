@@ -1,0 +1,225 @@
+{
+  "name": "Crypto Morning Brief — CoinGecko → Discord",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "hours", "hoursInterval": 1 }]
+        }
+      },
+      "id": "node-schedule",
+      "name": "Schedule Trigger (Every Hour)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 340]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.coingecko.com/api/v3/coins/markets",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "vs_currency", "value": "usd" },
+            { "name": "order", "value": "market_cap_desc" },
+            { "name": "per_page", "value": "10" },
+            { "name": "page", "value": "1" },
+            { "name": "sparkline", "value": "false" },
+            { "name": "price_change_percentage", "value": "24h" }
+          ]
+        },
+        "options": {
+          "timeout": 10000,
+          "response": { "response": { "responseFormat": "json" } }
+        }
+      },
+      "id": "node-coingecko-markets",
+      "name": "CoinGecko — Top 10 by Market Cap",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 340],
+      "onError": "continueErrorOutput",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filter: keep only top 5 by market cap\n// Sort descending by 24h % change for the digest\nconst coins = $input.all().map(i => i.json);\n\n// Flatten if nested (n8n returns array items)\nconst allCoins = Array.isArray(coins[0]) ? coins[0] : coins;\n\nconst top5 = allCoins\n  .slice(0, 5)\n  .sort((a, b) => (b.price_change_percentage_24h || 0) - (a.price_change_percentage_24h || 0));\n\nreturn top5.map(coin => ({\n  json: {\n    id: coin.id,\n    symbol: coin.symbol?.toUpperCase(),\n    name: coin.name,\n    price_usd: coin.current_price,\n    market_cap: coin.market_cap,\n    change_24h: parseFloat((coin.price_change_percentage_24h || 0).toFixed(2)),\n    volume_24h: coin.total_volume\n  }\n}));"
+      },
+      "id": "node-transform",
+      "name": "Transform — Top 5, Sort by 24h Change",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 340]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.coingecko.com/api/v3/coins/{{ $json.id }}/market_chart",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "vs_currency", "value": "usd" },
+            { "name": "days", "value": "1" },
+            { "name": "interval", "value": "hourly" }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "node-coingecko-chart",
+      "name": "CoinGecko — 24h Chart (Top Coin)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [960, 200],
+      "onError": "continueErrorOutput",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.change_24h }}",
+              "rightValue": 5,
+              "operator": { "type": "number", "operation": "gte" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node-if",
+      "name": "IF — 24h Change ≥ 5%?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [960, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Aggregate all top-5 items into a single Discord message\nconst items = $input.all();\n\nconst lines = items.map(item => {\n  const c = item.json;\n  const arrow = c.change_24h >= 0 ? '🟢' : '🔴';\n  const changeStr = c.change_24h >= 0 ? `+${c.change_24h}%` : `${c.change_24h}%`;\n  const price = c.price_usd?.toLocaleString('en-US', { style: 'currency', currency: 'USD' }) || 'N/A';\n  return `${arrow} **${c.symbol}** (${c.name}) — ${price}  |  24h: ${changeStr}`;\n}).join('\\n');\n\nconst now = new Date().toUTCString();\n\nreturn [{\n  json: {\n    content: `📊 **Crypto Morning Brief** — ${now}\\n\\n${lines}\\n\\n_Top 5 by Market Cap · Powered by CoinGecko_`\n  }\n}];"
+      },
+      "id": "node-build-normal",
+      "name": "Build Normal Digest Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 480]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build a SURGE ALERT digest — at least one coin moved ≥ 5%\nconst items = $input.all();\n\nconst lines = items.map(item => {\n  const c = item.json;\n  const arrow = c.change_24h >= 5 ? '🚀' : (c.change_24h >= 0 ? '🟢' : '🔴');\n  const changeStr = c.change_24h >= 0 ? `+${c.change_24h}%` : `${c.change_24h}%`;\n  const price = c.price_usd?.toLocaleString('en-US', { style: 'currency', currency: 'USD' }) || 'N/A';\n  const flag = Math.abs(c.change_24h) >= 5 ? ' ⚠️ SURGE' : '';\n  return `${arrow} **${c.symbol}** — ${price}  |  24h: ${changeStr}${flag}`;\n}).join('\\n');\n\nconst now = new Date().toUTCString();\n\nreturn [{\n  json: {\n    content: `🚨 **CRYPTO SURGE ALERT** — ${now}\\n\\nOne or more coins moved ≥5% in 24h!\\n\\n${lines}\\n\\n_Top 5 by Market Cap · Powered by CoinGecko_`\n  }\n}];"
+      },
+      "id": "node-build-surge",
+      "name": "Build SURGE ALERT Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 280]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $credentials.discordWebhookUrl }}",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "content", "value": "={{ $json.content }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-discord-main",
+      "name": "Discord — Send Digest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "credentials": { "httpHeaderAuth": { "id": "cred-discord", "name": "Discord Webhook URL" } },
+      "position": [1440, 380],
+      "onError": "continueErrorOutput",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Error handler — build a fallback error notification\nconst err = $input.first()?.json;\nconst now = new Date().toUTCString();\nreturn [{\n  json: {\n    content: `❌ **Crypto Workflow ERROR** — ${now}\\n\\nA node failed during execution.\\n\\`\\`\\`json\\n${JSON.stringify(err, null, 2).slice(0, 800)}\\n\\`\\`\\`\\n_Check n8n execution log for details._`\n  }\n}];"
+      },
+      "id": "node-error-builder",
+      "name": "Build Error Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [960, 600]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $credentials.discordWebhookUrl }}",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "content", "value": "={{ $json.content }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-discord-error",
+      "name": "Discord — Send Error Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "credentials": { "httpHeaderAuth": { "id": "cred-discord", "name": "Discord Webhook URL" } },
+      "position": [1200, 600]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger (Every Hour)": {
+      "main": [[{ "node": "CoinGecko — Top 10 by Market Cap", "type": "main", "index": 0 }]]
+    },
+    "CoinGecko — Top 10 by Market Cap": {
+      "main": [
+        [{ "node": "Transform — Top 5, Sort by 24h Change", "type": "main", "index": 0 }],
+        [{ "node": "Build Error Message", "type": "main", "index": 0 }]
+      ]
+    },
+    "Transform — Top 5, Sort by 24h Change": {
+      "main": [
+        [
+          { "node": "CoinGecko — 24h Chart (Top Coin)", "type": "main", "index": 0 },
+          { "node": "IF — 24h Change ≥ 5%?", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "IF — 24h Change ≥ 5%?": {
+      "main": [
+        [{ "node": "Build SURGE ALERT Message", "type": "main", "index": 0 }],
+        [{ "node": "Build Normal Digest Message", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build SURGE ALERT Message": {
+      "main": [[{ "node": "Discord — Send Digest", "type": "main", "index": 0 }]]
+    },
+    "Build Normal Digest Message": {
+      "main": [[{ "node": "Discord — Send Digest", "type": "main", "index": 0 }]]
+    },
+    "Discord — Send Digest": {
+      "main": [
+        [],
+        [{ "node": "Build Error Message", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Error Message": {
+      "main": [[{ "node": "Discord — Send Error Alert", "type": "main", "index": 0 }]]
+    },
+    "CoinGecko — 24h Chart (Top Coin)": {
+      "main": [
+        [],
+        [{ "node": "Build Error Message", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "callerPolicy": "workflowsFromAList"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "instanceId": "assessment-submission"
+  }
+}
